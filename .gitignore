@@ -1,0 +1,7 @@
+framework_tool
+CLAUDE.md
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
