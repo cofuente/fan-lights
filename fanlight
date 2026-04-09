@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""fanlight — Framework fan LED controller."""
+
+import os
+import shutil
+import sys
+import time
+import signal
+import subprocess
+
+# Resolve the fan-lights repo directory. In order of preference:
+#   1. $FAN_LIGHTS_DIR env var (explicit override)
+#   2. The directory containing this script, if daemon.py is a sibling
+#      (works when running straight from a clone: `./fanlight`)
+#   3. ~/Repos/fan-lights (the documented install location, used when
+#      this script has been copied to ~/.local/bin/fanlight)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+FAN_LIGHTS_DIR = (
+    os.environ.get("FAN_LIGHTS_DIR")
+    or (_SCRIPT_DIR if os.path.exists(os.path.join(_SCRIPT_DIR, "daemon.py")) else None)
+    or os.path.expanduser("~/Repos/fan-lights")
+)
+DAEMON        = os.path.join(FAN_LIGHTS_DIR, "daemon.py")
+
+# ─── Colours ──────────────────────────────────────────────────────────────────
+CYAN   = "\033[0;36m"
+GREEN  = "\033[0;32m"
+YELLOW = "\033[0;33m"
+RED    = "\033[0;31m"
+BOLD   = "\033[1m"
+RESET  = "\033[0m"
+
+def ok(msg):   print(f"{GREEN}✓{RESET}  {msg}")
+def warn(msg): print(f"{YELLOW}!{RESET}  {msg}")
+def err(msg):  print(f"{RED}✗{RESET}  {msg}")
+
+# ─── Pattern discovery ────────────────────────────────────────────────────────
+
+def discover_patterns():
+    sys.path.insert(0, FAN_LIGHTS_DIR)
+    try:
+        from patterns import discover
+        return discover()
+    except Exception as e:
+        err(f"Could not load patterns from {FAN_LIGHTS_DIR}: {e}")
+        sys.exit(1)
+
+# ─── Process management ───────────────────────────────────────────────────────
+
+def start_pattern(choice):
+    """Run daemon.py in the background, inheriting the terminal for sudo-rs."""
+    return subprocess.Popen(
+        ["sudo", "-n", "python3", DAEMON, choice],
+        cwd=FAN_LIGHTS_DIR,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+
+def stop_pattern(proc):
+    """Terminate daemon.py gracefully (its SIGTERM handler turns lights off)."""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+# ─── Install validation ──────────────────────────────────────────────────────
+
+def validate_install():
+    """Fail fast with an actionable message if FAN_LIGHTS_DIR is wrong.
+
+    Without this, a bad FAN_LIGHTS_DIR surfaces later as an indirect error —
+    either `ImportError: No module named 'patterns'` from discover_patterns(),
+    or `python3: can't open file '.../daemon.py'` inside start_pattern()'s
+    stderr. Both leave the user guessing which path was tried and how to fix
+    it. This check runs first and prints the full resolution order so the
+    fix is obvious.
+    """
+    if os.path.exists(DAEMON):
+        return
+
+    err(f"Can't find daemon.py at: {DAEMON}")
+    print()
+    print("fanlight resolves the fan-lights repo location in this order:")
+    env_val = os.environ.get("FAN_LIGHTS_DIR") or "(not set)"
+    print(f"  1. $FAN_LIGHTS_DIR env var      → {env_val}")
+    print(f"  2. Script's own directory       → {_SCRIPT_DIR}")
+    print(f"  3. ~/Repos/fan-lights fallback  → {os.path.expanduser('~/Repos/fan-lights')}")
+    print()
+    print("If your clone lives somewhere else, point fanlight at it:")
+    print(f"  {CYAN}export FAN_LIGHTS_DIR=/path/to/your/fan-lights{RESET}")
+    print()
+    sys.exit(1)
+
+# ─── Sudo bootstrap ───────────────────────────────────────────────────────────
+
+def ensure_sudo():
+    """Make sure `sudo -n` will succeed for the rest of this session.
+
+    Probes by actually running daemon.py with a bogus pattern name. sudo
+    either grants access without a prompt (cached creds or NOPASSWD rule),
+    in which case daemon.py hits its "Unknown pattern" branch, prints a
+    message, and exits 0 — or sudo refuses with nonzero because a password
+    would be required.
+
+    The bogus pattern name is deliberate: it exercises the full
+    sudo→python3→daemon.py chain without side effects. daemon.py returns
+    from main() before any pattern loop or signal handler runs, so the
+    LEDs don't flicker during the probe.
+
+    NOTE: `sudo -n -l <command>` would NOT work here — `-l` answers
+    "is this rule permitted?" not "would this succeed without a prompt?"
+    and returns 0 even for commands that require a password.
+
+    If the probe fails, prompts interactively via `sudo -v` before the menu
+    loop starts — so there's no TTY contention with input(). All subsequent
+    `sudo -n` calls in start_pattern() then use the cached creds.
+
+    Returns True if sudo is ready, False if auth failed or was declined.
+    """
+    probe = subprocess.run(
+        ["sudo", "-n", "python3", DAEMON, "__ensure_sudo_probe__"],
+        capture_output=True,
+    )
+    if probe.returncode == 0:
+        return True
+
+    warn("fanlight needs sudo to drive the LEDs (daemon.py requires root).")
+    print(f"  You'll be prompted for your password once.")
+    print(f"  To skip this in the future, add the NOPASSWD rule from README step 4.\n")
+
+    result = subprocess.run(["sudo", "-v"])
+    if result.returncode != 0:
+        err("Could not authenticate. Aborting.")
+        return False
+    return True
+
+# ─── Input helper ─────────────────────────────────────────────────────────────
+
+def get_choice(patterns, names):
+    """Read and validate user input. Returns pattern string, 'gui', or 'quit'."""
+    print(f"  {YELLOW}Tip:{RESET} enter comma-separated names to cycle, e.g. {CYAN}rainbow,fire{RESET}")
+    print()
+    while True:
+        try:
+            raw = input(f"{BOLD}>{RESET} ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return "quit"
+
+        if not raw:
+            continue
+        if raw == "q":
+            return "quit"
+        if raw == "g":
+            return "gui"
+
+        if raw.isdigit():
+            idx = int(raw) - 1
+            if idx == len(names):           # "cycle all" option
+                return ",".join(names)
+            if 0 <= idx < len(names):
+                return names[idx]
+            warn("Number out of range — try again")
+            continue
+
+        tokens = [t.strip() for t in raw.split(",")]
+        invalid = [t for t in tokens if t not in patterns]
+        if invalid:
+            warn(f"Unknown pattern(s): {', '.join(invalid)} — try again")
+            continue
+
+        return ",".join(tokens)
+
+# ─── Menus ────────────────────────────────────────────────────────────────────
+
+def main_menu(patterns):
+    names = sorted(patterns.keys())
+    print(f"\n{BOLD}Choose a pattern:{RESET}\n")
+    for i, name in enumerate(names, 1):
+        print(f"  {CYAN}{i}{RESET}. {name}")
+    print(f"  {CYAN}{len(names) + 1}{RESET}. cycle all  (30s each)")
+    print()
+    print(f"  {CYAN}g{RESET}. open OpenRGB GUI")
+    print(f"  {CYAN}q{RESET}. quit")
+    print()
+    return get_choice(patterns, names)
+
+def running_menu(patterns, current):
+    names  = sorted(patterns.keys())
+    label  = f"cycling {current.replace(',', ' → ')}" if "," in current else current
+    print(f"\n{GREEN}►{RESET} {BOLD}{label}{RESET}\n")
+    print(f"{BOLD}Switch pattern:{RESET}\n")
+    for i, name in enumerate(names, 1):
+        active = f"{GREEN}●{RESET}" if name == current else " "
+        print(f"  {active} {CYAN}{i}{RESET}. {name}")
+    print(f"  {CYAN}{len(names) + 1}{RESET}. cycle all")
+    print()
+    print(f"  {CYAN}g{RESET}. open OpenRGB GUI  {YELLOW}(for per-LED precision control){RESET}")
+    print(f"  {CYAN}q{RESET}. quit & lights off")
+    print()
+    return get_choice(patterns, names)
+
+# ─── OpenRGB ──────────────────────────────────────────────────────────────────
+
+def open_openrgb():
+    openrgb_bin = shutil.which("openrgb")
+    if openrgb_bin is None:
+        warn("OpenRGB is not installed, or not on $PATH.")
+        print(f"  Install it with: {CYAN}sudo apt install openrgb{RESET}")
+        print(f"  Or see README step 5 for other install methods.\n")
+        return
+
+    running = subprocess.run(["pgrep", "-x", "openrgb"], capture_output=True).returncode == 0
+    if running:
+        warn("OpenRGB is already open — check your taskbar")
+    else:
+        subprocess.Popen([openrgb_bin], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ok("OpenRGB launched")
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    print(f"\n{BOLD}fanlight{RESET} — Framework fan LED controller")
+
+    validate_install()
+    patterns = discover_patterns()
+
+    if not ensure_sudo():
+        sys.exit(1)
+
+    proc     = None
+    current  = None
+
+    def cleanup(sig=None, frame=None):
+        stop_pattern(proc)
+        print(f"\n{YELLOW}Lights off. Bye!{RESET}\n")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT,  cleanup)
+    signal.signal(signal.SIGTERM, cleanup)
+
+    choice = main_menu(patterns)
+
+    while True:
+        if choice == "quit":
+            stop_pattern(proc)
+            print(f"\n{YELLOW}Lights off. Bye!{RESET}\n")
+            break
+
+        if choice == "gui":
+            open_openrgb()
+            choice = running_menu(patterns, current) if current else main_menu(patterns)
+            continue
+
+        # New pattern selected — only restart if it changed
+        if choice != current:
+            stop_pattern(proc)
+            time.sleep(0.3)
+            proc    = start_pattern(choice)
+            current = choice
+
+            # Give it a moment and check it didn't immediately crash
+            time.sleep(0.5)
+            if proc.poll() is not None:
+                error = proc.stderr.read().decode().strip()
+                err(f"Pattern failed to start: {error}")
+                if "password is required" in error or "sudo:" in error:
+                    print(f"  {YELLOW}Your sudo session may have expired.{RESET}")
+                    print(f"  Quit with {CYAN}q{RESET} and re-run fanlight to re-authenticate.\n")
+                proc    = None
+                current = None
+                choice  = main_menu(patterns)
+                continue
+
+        choice = running_menu(patterns, current)
+
+if __name__ == "__main__":
+    main()
