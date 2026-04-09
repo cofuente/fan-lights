@@ -1,7 +1,8 @@
 # fan-lights
 
-Controls the 8 RGB LEDs on a Framework laptop's Mobius fan. Two modes of operation:
+A small Python project that drives the 8 RGB LEDs on a Framework laptop's Mobius fan. Everything hangs off a single vendor binary, framework_tool, which takes a command like `./framework_tool --rgbkbd 0 0xff0000 0x00ff00 0x00ff00 0xff0000 0` (always 8 hex colors for the 8 lights).
 
+This project works 3 ways: 
 1. **`daemon.py`** — standalone daemon that drives LEDs directly via `framework_tool`
 2. **`rgb_bridge.py`** — OpenRGB bridge that polls a virtual `FrameworkFan` device in OpenRGB and forwards colors to `framework_tool`
 3. **`fanlight`** — interactive CLI tool (installed separately) that wraps `daemon.py` with a live pattern-switching menu
@@ -14,6 +15,7 @@ Controls the 8 RGB LEDs on a Framework laptop's Mobius fan. Two modes of operati
 fan-lights/
 ├── daemon.py          # Standalone pattern runner (requires sudo)
 ├── rgb_bridge.py      # OpenRGB SDK bridge
+├── fanlight           # Interactive CLI wrapper around daemon.py
 ├── framework_tool     # Binary — low-level LED control (download separately, see below)
 ├── CLAUDE.md          # Notes for Claude Code
 ├── README.md          # This file
@@ -28,7 +30,7 @@ fan-lights/
 
 ---
 
-## Requirements
+## Requirements, or really just what this project is designed for
 
 - Ubuntu (tested on 25.10) or other Linux distro with `sudo`/`sudo-rs`
 - Python 3.10+
@@ -46,9 +48,9 @@ git clone <repo-url> ~/Repos/fan-lights
 cd ~/Repos/fan-lights
 ```
 
-### 2. Download `framework_tool`
+### 2.🚨 Download `framework_tool` 🚨
 
-The binary is not included in the repo and must be downloaded separately from the [Framework Computer releases page](https://github.com/FrameworkComputer/framework-system/releases).
+This project works only by leveraging the Framework binary. The binary is **NOT** included in the repo and must be downloaded separately from the [Framework Computer releases page](https://github.com/FrameworkComputer/framework-system/releases).
 
 Download the latest version directly into the repo root:
 
@@ -65,7 +67,9 @@ chmod +x ~/Repos/fan-lights/framework_tool
 
 > **Important:** `framework_tool` must live in the repo root (`fan-lights/`). `daemon.py` calls it via the relative path `./framework_tool` and will fail with `FileNotFoundError` if it is elsewhere.
 
-### 2. Install the `fanlight` CLI tool
+### 3. (Optional- but recommended!) Install the `fanlight` CLI tool
+
+`fanlight` is a convenience wrapper around `daemon.py` that provides an interactive pattern-switching menu. Skip this step if you only plan to use `daemon.py` or `rgb_bridge.py` directly.
 
 Copy the script to your local bin and make it executable:
 
@@ -80,9 +84,9 @@ Make sure `~/.local/bin` is on your PATH. Add this to `~/.zshrc` or `~/.bashrc` 
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-### 3. Add the sudoers rule
+### 4. (Optional) Add the sudoers rule
 
-`daemon.py` calls `framework_tool` which requires root. Add a targeted NOPASSWD rule so `fanlight` can run it without prompting for a password every time.
+`daemon.py` calls `framework_tool`, which requires root. You can always run it with `sudo` and type your password — but adding a targeted NOPASSWD rule lets `daemon.py` (and `fanlight`, if installed) run without prompting every time.
 
 Open sudoers safely with:
 
@@ -102,7 +106,7 @@ yourusername ALL=(ALL) NOPASSWD: /usr/bin/python3 /home/yourusername/Repos/fan-l
 > - If you move the repo to a different path, update this rule to match
 > - On systems using `sudo-rs` (Ubuntu 25.10+), the rule must be in `/etc/sudoers` directly, not in `/etc/sudoers.d/`, unless `@includedir /etc/sudoers.d` is present in the main sudoers file
 
-### 4. (Optional) Install OpenRGB
+### 5. (Optional) Install OpenRGB
 
 Only needed if you want the GUI for per-LED precision control or plan to use `rgb_bridge.py`:
 
@@ -112,7 +116,32 @@ sudo apt install openrgb -y
 
 ---
 
-## Usage
+## How to Use
+
+
+### `daemon.py` — direct CLI
+
+```bash
+# List available patterns
+sudo python3 daemon.py
+
+# Run a single pattern
+sudo python3 daemon.py rainbow
+
+# Cycle patterns (30s each)
+sudo python3 daemon.py rainbow,fire,comet
+```
+
+Must be run from the `fan-lights/` directory — `framework_tool` is referenced by relative path `./framework_tool`.
+
+#### The four patterns:
+
+| Name | How it works |
+|---|---|
+| `rainbow` | Rotates hue around the ring: `hsv(tick*0.02 + i/8)` per LED. |
+| `breathe` | All 8 LEDs same color, brightness = `(sin(tick*0.04)+1)/2`. Configurable hue (default `0.55` ≈ cyan). |
+| `comet` | One bright head at `tick % 8`, trail fades by `1 - dist*0.25` going backwards around the ring. |
+| `fire` | Every frame, every LED gets a random hue in `[0, 0.08]` (red→yellow) and random brightness `[0.3, 1.0]`. Pure noise; no temporal coupling between frames. |
 
 ### `fanlight` — interactive CLI (recommended)
 
@@ -132,21 +161,6 @@ Presents a numbered menu of available patterns. While a pattern is running:
 | `q` or `Ctrl+C` | Quit and turn lights off |
 
 Selecting the same pattern that is already running does nothing (no restart).
-
-### `daemon.py` — direct CLI
-
-```bash
-# List available patterns
-sudo python3 daemon.py
-
-# Run a single pattern
-sudo python3 daemon.py rainbow
-
-# Cycle patterns (30s each)
-sudo python3 daemon.py rainbow,fire,comet
-```
-
-Must be run from the `fan-lights/` directory — `framework_tool` is referenced by relative path `./framework_tool`.
 
 ### `rgb_bridge.py` — OpenRGB integration
 
