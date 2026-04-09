@@ -66,15 +66,53 @@ def stop_pattern(proc):
     except subprocess.TimeoutExpired:
         proc.kill()
 
+# ─── Install validation ──────────────────────────────────────────────────────
+
+def validate_install():
+    """Fail fast with an actionable message if FAN_LIGHTS_DIR is wrong.
+
+    Without this, a bad FAN_LIGHTS_DIR surfaces later as an indirect error —
+    either `ImportError: No module named 'patterns'` from discover_patterns(),
+    or `python3: can't open file '.../daemon.py'` inside start_pattern()'s
+    stderr. Both leave the user guessing which path was tried and how to fix
+    it. This check runs first and prints the full resolution order so the
+    fix is obvious.
+    """
+    if os.path.exists(DAEMON):
+        return
+
+    err(f"Can't find daemon.py at: {DAEMON}")
+    print()
+    print("fanlight resolves the fan-lights repo location in this order:")
+    env_val = os.environ.get("FAN_LIGHTS_DIR") or "(not set)"
+    print(f"  1. $FAN_LIGHTS_DIR env var      → {env_val}")
+    print(f"  2. Script's own directory       → {_SCRIPT_DIR}")
+    print(f"  3. ~/Repos/fan-lights fallback  → {os.path.expanduser('~/Repos/fan-lights')}")
+    print()
+    print("If your clone lives somewhere else, point fanlight at it:")
+    print(f"  {CYAN}export FAN_LIGHTS_DIR=/path/to/your/fan-lights{RESET}")
+    print()
+    sys.exit(1)
+
 # ─── Sudo bootstrap ───────────────────────────────────────────────────────────
 
 def ensure_sudo():
     """Make sure `sudo -n` will succeed for the rest of this session.
 
-    Probes with `sudo -n -l python3 daemon.py rainbow` — asks sudo "would
-    this command be allowed right now without a prompt?" without actually
-    running it. Succeeds if the user has the NOPASSWD rule from README
-    step 4 *or* already-cached credentials.
+    Probes by actually running daemon.py with a bogus pattern name. sudo
+    either grants access without a prompt (cached creds or NOPASSWD rule),
+    in which case daemon.py hits its "Unknown pattern" branch, prints a
+    message, and exits 0 — or sudo refuses with nonzero because a password
+    would be required.
+
+    The bogus pattern name is deliberate: it exercises the full
+    sudo→python3→daemon.py chain without side effects. daemon.py returns
+    from main() before any pattern loop or signal handler runs, so the
+    LEDs don't flicker during the probe.
+
+    NOTE: `sudo -n -l <command>` would NOT work here — `-l` answers
+    "is this rule permitted?" not "would this succeed without a prompt?"
+    and returns 0 even for commands that require a password.
 
     If the probe fails, prompts interactively via `sudo -v` before the menu
     loop starts — so there's no TTY contention with input(). All subsequent
@@ -83,7 +121,7 @@ def ensure_sudo():
     Returns True if sudo is ready, False if auth failed or was declined.
     """
     probe = subprocess.run(
-        ["sudo", "-n", "-l", "python3", DAEMON, "rainbow"],
+        ["sudo", "-n", "python3", DAEMON, "__ensure_sudo_probe__"],
         capture_output=True,
     )
     if probe.returncode == 0:
@@ -187,6 +225,7 @@ def open_openrgb():
 def main():
     print(f"\n{BOLD}fanlight{RESET} — Framework fan LED controller")
 
+    validate_install()
     patterns = discover_patterns()
 
     if not ensure_sudo():
