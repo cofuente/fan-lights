@@ -208,11 +208,12 @@ Helper methods available on all patterns:
 `daemon.py` uses a relative path. Always run it from the `fan-lights/` directory, or use `fanlight` which handles this automatically.
 
 ### `sudo-rs: interactive authentication is required`
-The NOPASSWD sudoers rule is missing or not being read. Verify with:
+If using `fanlight`, this should not appear at startup — `fanlight` prompts for your password interactively before the menu appears. If it appears mid-session while switching patterns, your sudo credential cache has expired (~15 minutes by default). Quit with `q` and re-run `fanlight` to re-authenticate.
+
+If running `daemon.py` directly, this means no cached credentials and no NOPASSWD rule. Either run `sudo -v` first to cache credentials, or add the NOPASSWD rule from step 4. Verify the rule is being read with:
 ```bash
 sudo grep NOPASSWD /etc/sudoers
 ```
-Also check that `fanlight` calls `sudo -n` (non-interactive flag) — without `-n`, sudo-rs may attempt tty-based auth even when a NOPASSWD rule exists.
 
 ### `setsid` / no controlling terminal issues
 If running `daemon.py` from a script that detaches from the terminal (e.g. using `os.setsid()`), sudo-rs will fail to authenticate even with NOPASSWD. The `fanlight` script intentionally does **not** use `setsid` for this reason.
@@ -227,4 +228,4 @@ On some Ubuntu 25.10 systems with `sudo-rs`, `/etc/sudoers.d/` is not automatica
 | File | Purpose |
 |---|---|
 | `~/.local/bin/fanlight` | The interactive CLI tool |
-| `/etc/sudoers` | Contains the NOPASSWD rule for `daemon.py` |
+| `/etc/sudoers` | Contains the NOPASSWD rule for `daemon.py` (if step 4 was followed) |
