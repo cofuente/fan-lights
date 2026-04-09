@@ -66,6 +66,39 @@ def stop_pattern(proc):
     except subprocess.TimeoutExpired:
         proc.kill()
 
+# ─── Sudo bootstrap ───────────────────────────────────────────────────────────
+
+def ensure_sudo():
+    """Make sure `sudo -n` will succeed for the rest of this session.
+
+    Probes with `sudo -n -l python3 daemon.py rainbow` — asks sudo "would
+    this command be allowed right now without a prompt?" without actually
+    running it. Succeeds if the user has the NOPASSWD rule from README
+    step 4 *or* already-cached credentials.
+
+    If the probe fails, prompts interactively via `sudo -v` before the menu
+    loop starts — so there's no TTY contention with input(). All subsequent
+    `sudo -n` calls in start_pattern() then use the cached creds.
+
+    Returns True if sudo is ready, False if auth failed or was declined.
+    """
+    probe = subprocess.run(
+        ["sudo", "-n", "-l", "python3", DAEMON, "rainbow"],
+        capture_output=True,
+    )
+    if probe.returncode == 0:
+        return True
+
+    warn("fanlight needs sudo to drive the LEDs (daemon.py requires root).")
+    print(f"  You'll be prompted for your password once.")
+    print(f"  To skip this in the future, add the NOPASSWD rule from README step 4.\n")
+
+    result = subprocess.run(["sudo", "-v"])
+    if result.returncode != 0:
+        err("Could not authenticate. Aborting.")
+        return False
+    return True
+
 # ─── Input helper ─────────────────────────────────────────────────────────────
 
 def get_choice(patterns, names):
@@ -148,6 +181,10 @@ def main():
     print(f"\n{BOLD}fanlight{RESET} — Framework fan LED controller")
 
     patterns = discover_patterns()
+
+    if not ensure_sudo():
+        sys.exit(1)
+
     proc     = None
     current  = None
 
