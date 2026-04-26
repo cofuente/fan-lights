@@ -48,10 +48,19 @@ def discover_patterns():
 # ─── Process management ───────────────────────────────────────────────────────
 
 def start_pattern(choice):
-    """Run daemon.py in the background, inheriting the terminal for sudo-rs."""
+    """Run daemon.py in the background.
+
+    stdin=DEVNULL is load-bearing: without it, sudo-rs inherits the parent's
+    controlling TTY and reconfigures termios for signal forwarding (turning
+    off ONLCR, ECHO, ISIG). It does not restore those flags on exit, leaving
+    the parent terminal stair-stepped and unresponsive. Since ensure_sudo()
+    has already cached creds, `sudo -n` will never prompt and has no need
+    for a TTY in this code path.
+    """
     return subprocess.Popen(
         ["sudo", "-n", "python3", DAEMON, choice],
         cwd=FAN_LIGHTS_DIR,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
     )
